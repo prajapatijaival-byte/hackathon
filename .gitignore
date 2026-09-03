@@ -1,0 +1,7 @@
+node_modules
+database/db.sqlite
+uploads/*
+!uploads/.gitkeep
+frontend/dist
+.env
+.env.local
