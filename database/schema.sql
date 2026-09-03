@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS complaints (
     assigned_to INTEGER,
     is_suspicious BOOLEAN DEFAULT 0,
     suspicious_reason TEXT,
+    upvotes INTEGER DEFAULT 0,
     verification_status TEXT,
     citizen_confirmation TEXT,
     after_repair_image_path TEXT,

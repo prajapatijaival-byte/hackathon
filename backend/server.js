@@ -7,6 +7,10 @@ const http = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
 const Jimp = require('jimp');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = 'hackathon_super_secret_key_2026';
 
 const app = express();
 app.use(cors());
@@ -40,11 +44,41 @@ function logActivity(complaint_id, user_id, action, details) {
 }
 
 // ---------------- AUTHENTICATION ----------------
+app.post('/api/register', async (req, res) => {
+    const { name, email, password, role } = req.body;
+    if (!['reporter', 'authority'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+    
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        db.run("INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)", [name, email, hashedPassword, role], function(err) {
+            if (err) {
+                if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Email already exists' });
+                return res.status(500).json({ error: err.message });
+            }
+            
+            const user = { id: this.lastID, name, email, role };
+            const token = jwt.sign(user, JWT_SECRET, { expiresIn: '24h' });
+            res.json({ token, user });
+        });
+    } catch (e) {
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
 app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
-    db.get("SELECT id, name, email, role FROM users WHERE email = ? AND password = ?", [email, password], (err, user) => {
+    db.get("SELECT id, name, email, password as hash, role FROM users WHERE email = ?", [email], async (err, user) => {
         if (err || !user) return res.status(401).json({ error: 'Invalid credentials' });
-        res.json({ token: Buffer.from(JSON.stringify(user)).toString('base64'), user });
+        
+        // Because seed data passwords aren't hashed, we check both plain (for demo) and bcrypt
+        const isValid = await bcrypt.compare(password, user.hash).catch(() => false);
+        const isPlainMatch = password === user.hash; // Fallback for old unhashed seed data
+        
+        if (!isValid && !isPlainMatch) return res.status(401).json({ error: 'Invalid credentials' });
+        
+        const payload = { id: user.id, name: user.name, email: user.email, role: user.role };
+        const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+        res.json({ token, user: payload });
     });
 });
 
@@ -53,7 +87,8 @@ const authMiddleware = (req, res, next) => {
     if (!header) return res.status(401).json({ error: 'No token' });
     try {
         const token = header.split(' ')[1];
-        req.user = JSON.parse(Buffer.from(token, 'base64').toString('ascii'));
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.user = decoded;
         next();
     } catch(e) {
         res.status(401).json({ error: 'Invalid token' });
@@ -157,6 +192,29 @@ app.post('/api/complaints/:id/confirm', authMiddleware, (req, res) => {
         logActivity(req.params.id, req.user.id, 'citizen_confirmation', { note: 'Citizen confirmed fix' });
         io.emit('complaint_completed', { id: req.params.id });
         res.json({ success: true });
+    });
+});
+
+// Upvote complaint
+app.post('/api/complaints/:id/upvote', authMiddleware, (req, res) => {
+    db.run("UPDATE complaints SET upvotes = upvotes + 1, priority_score = priority_score + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.id], (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        logActivity(req.params.id, req.user.id, 'complaint_upvoted', { note: 'Citizen upvoted' });
+        io.emit('complaint_updated', { id: req.params.id });
+        res.json({ success: true });
+    });
+});
+
+// Analytics Dashboard
+app.get('/api/analytics', authMiddleware, (req, res) => {
+    if (req.user.role !== 'authority') return res.status(403).json({ error: 'Unauthorized' });
+    
+    db.all("SELECT category, COUNT(*) as count FROM complaints GROUP BY category", [], (err, categories) => {
+        if (err) return res.status(500).json({ error: err.message });
+        db.all("SELECT status, COUNT(*) as count FROM complaints GROUP BY status", [], (err, statuses) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ categories, statuses });
+        });
     });
 });
 
